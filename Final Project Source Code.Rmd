@@ -1,0 +1,1116 @@
+---
+title: "Final Project CS760"
+author: "Ayushi Mishra, Neil Bhutada"
+date: "5/6/2022"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown
+
+```{r}
+rm(list = ls())
+library(readxl)
+library(tidyverse)
+library(ggplot2)
+library(dplyr)
+library(tidymodels)
+library(embed)
+library(patchwork)
+library(h2o)
+library(caret)
+library(kknn)
+
+```
+
+```{r}
+h2o.init()
+```
+
+```{r}
+data_ct <- readxl::read_xlsx("OppScrData.xlsx")
+
+data_ct <- data_ct%>%
+  dplyr::select(-starts_with("..."))
+```
+
+```{r}
+cols <- colnames(data_ct)
+cols
+```
+
+
+```{r}
+#filtering the data for people who were alive 
+
+data_ct_2 <- data_ct %>%
+  filter(is.na(`DEATH [d from CT]`)) %>%
+  dplyr::select(c(cols[42:52], cols[8])) %>%
+  mutate(index = row_number())%>%
+  drop_na()
+```
+
+• Computerized Tomography Data
+– Col AP: Bone measure/BMD (L1 HU) - L1_HU_BMD
+– Cols AQ-AU: Fat measures (total/visceral/subcutaneous; V/S ratio; all total body X-section) - TAT Area (cm2), Total Body Area EA (cm2), VAT Area (cm2), SAT Area (cm2), VAT/SAT Ratio
+– Cols AV-AX: Muscle measures (HU/Area/SMI) - Muscle HU, Muscle Area (cm2), L3 SMI (cm2/m2)
+– Col AY: Aortic Calcification (Ag) - AoCa Agatston
+– Col AZ: Liver fat (HU) - Liver HU (Median)
+
+
+```{r}
+hist(data_ct_2 %>%
+  dplyr::select(`Age at CT`) %>%
+    pull(`Age at CT`))
+```
+
+```{r}
+## data for the people who died and had # of days after death in DEATH [d from CT]
+
+dead <- data_ct%>%
+  filter(!is.na(`DEATH [d from CT]`)) %>%
+  select(c(cols[42:52], cols[8],`DEATH [d from CT]`)) %>%
+  mutate(index= row_number())%>%
+  drop_na()
+
+
+pca <- data_ct_2  %>%
+  select(c(cols[42:52])) %>%
+  prcomp(scale = TRUE )
+
+summary(pca)
+```
+
+```{r}
+
+as.data.frame(pca$x) %>%
+  pivot_longer(1:8,names_to = "Components", values_to = "Value") %>%
+  select(-c(PC9, PC10, PC11))%>%
+  ggplot(aes(x = Value, y = Components))+
+  geom_boxplot()
+
+pc_scores <- as.data.frame(pca$x) %>%
+    mutate(index = row_number()) %>%
+  pivot_longer(1:8,names_to = "Components", values_to = "Value") %>%
+  select(-c(PC9, PC10, PC11)) %>%
+  select(index, everything())
+
+
+pc_scores %>%
+  group_by(Components) %>%
+  summarise(perc_25 = quantile(Value, prob = 0.25),
+            perc_75 = quantile(Value, prob = 0.75),
+            iqr = IQR(Value),
+            lower_lim = perc_25 - 1.5*iqr,
+            upper_lim = perc_75 + 1.5*iqr)
+
+
+
+PC1s <- pc_scores %>%
+  filter(Components == "PC1" & (Value <= 5.6176637 & Value >= -5.9405511))
+
+PC2 <- pc_scores %>%
+  filter(Components == "PC2" & (Value <= 3.7738214	 & Value >= -3.8195049))
+PC3 <- pc_scores %>%
+  filter(Components == "PC3" & (Value <= 2.5563002	 & Value >= -2.4058604))
+PC4 <- pc_scores %>%
+  filter(Components == "PC4" & (Value <= 2.0037599	 & Value >= -1.9557049))
+PC5 <- pc_scores %>%
+  filter(Components == "PC5" & (Value <= 2.0322387	 & Value >= -1.8819016))
+PC6 <- pc_scores %>%
+  filter(Components == "PC6" & (Value <= 1.8293116	 & Value >= -1.7269114))
+PC7 <- pc_scores %>%
+  filter(Components == "PC7" & (Value <= 1.4887732	 & Value >= -1.5122717))
+PC8 <- pc_scores %>%
+  filter(Components == "PC8" & (Value <= 0.6073705	 & Value >= -0.5884415))
+
+```
+
+```{r}
+common_index <- PC1s %>%
+  inner_join(PC2, by = "index") %>%
+  inner_join(PC3, by = "index") %>%
+  inner_join(PC4, by = "index") %>%
+  inner_join(PC5, by = "index") %>%
+  inner_join(PC6, by = "index") %>%
+  inner_join(PC7, by = "index") %>%
+  inner_join(PC8, by = "index") %>%
+  pull(index)
+
+
+ data_ct_3 <- data_ct_2 %>%
+  filter(index %in% common_index)
+```
+
+```{r}
+pivoted <- data_ct_3 %>%
+  mutate(age_groups = case_when(
+    `Age at CT` >= 20 & `Age at CT` < 30 ~ "20-30",
+    `Age at CT` >= 30 & `Age at CT` < 40 ~ "30-40",
+    `Age at CT` >= 40 & `Age at CT` < 50 ~ "40-50",
+    `Age at CT` >= 50 & `Age at CT` < 60 ~ "50-60",
+    `Age at CT` >= 60 & `Age at CT` < 70 ~ "60-70",
+    `Age at CT` >= 70 & `Age at CT` < 80 ~ "70-80",
+    `Age at CT` >= 80 & `Age at CT` < 90 ~ "80-90",
+    `Age at CT` >= 90 & `Age at CT` < 100 ~ "90-100"
+    )
+    ) %>%
+  pivot_longer(-c(`Age at CT`, age_groups, index), names_to = "data", values_to = "measures")%>%
+  drop_na()
+```
+
+
+```{r}
+pivoted %>%
+  ggplot(aes(y = data, x = measures))+
+  geom_boxplot()
+```
+
+```{r}
+val <- pivoted[10, 4] %>% pull()
+
+pivoted %>%
+  filter(data == val) %>%
+  group_by(age_groups) %>%
+  summarise(perc_25 = quantile(measures, prob = 0.25), 
+            perc_75 = quantile(measures, prob = 0.75))
+```
+
+```{r}
+Age20 <- pivoted %>%
+   pivot_wider(id_cols = c(index,`Age at CT`, age_groups), names_from = data, values_from = measures) %>%
+  filter(age_groups == "20-30") %>%
+  filter(.data[[val]] >= 0 & .data[[val]] <= 0)
+
+Age30 <- pivoted %>%
+   pivot_wider(id_cols = c(index,`Age at CT`, age_groups), names_from = data, values_from = measures) %>%
+  filter(age_groups == "30-40") %>%
+  filter(.data[[val]] >= 0 & .data[[val]] <= 0)
+
+Age40 <- pivoted %>%
+   pivot_wider(id_cols = c(index,`Age at CT`, age_groups), names_from = data, values_from = measures) %>%
+  filter(age_groups == "40-50") %>%
+  filter(.data[[val]] >= 0 & .data[[val]] <= 27.680)
+
+Age50 <- pivoted %>%
+   pivot_wider(id_cols = c(index,`Age at CT`, age_groups), names_from = data, values_from = measures) %>%
+  filter(age_groups == "50-60") %>%
+  filter(.data[[val]] >= 0.00000 & .data[[val]] <= 192.4390)
+
+Age60 <- pivoted %>%
+   pivot_wider(id_cols = c(index,`Age at CT`, age_groups), names_from = data, values_from = measures) %>%
+  filter(age_groups == "60-70") %>%
+  filter(.data[[val]] >= 36.74925	 & .data[[val]] <= 992.6322)
+
+Age70 <- pivoted %>%
+   pivot_wider(id_cols = c(index,`Age at CT`, age_groups), names_from = data, values_from = measures) %>%
+  filter(age_groups == "70-80") %>%
+  filter(.data[[val]] >= 390.89400 & .data[[val]] <= 3866.3930)
+
+Age80 <- pivoted %>%
+   pivot_wider(id_cols = c(index,`Age at CT`, age_groups), names_from = data, values_from = measures) %>%
+  filter(age_groups == "80-90") %>%
+  filter(.data[[val]] >= 1403.20125	& .data[[val]] <= 5481.8255)
+
+
+data_f <- rbind(Age20, Age30, Age40, Age50, Age60, Age70, Age80)
+```
+
+```{r}
+# filtered on the above data based on normal bone density
+
+val <- pivoted[1, 4] %>% pull()
+
+
+pivoted %>%
+  filter(data == val) %>%
+  group_by(age_groups) %>%
+  summarise(perc_25 = quantile(measures, prob = 0.25), 
+            perc_75 = quantile(measures, prob = 0.75))
+```
+
+```{r}
+data_f_2 <- data_f %>%
+  mutate(age_groups = case_when(
+    `Age at CT` >= 20 & `Age at CT` < 30 ~ "20-30",
+    `Age at CT` >= 30 & `Age at CT` < 40 ~ "30-40",
+    `Age at CT` >= 40 & `Age at CT` < 50 ~ "40-50",
+    `Age at CT` >= 50 & `Age at CT` < 60 ~ "50-60",
+    `Age at CT` >= 60 & `Age at CT` < 70 ~ "60-70",
+    `Age at CT` >= 70 & `Age at CT` < 80 ~ "70-80",
+    `Age at CT` >= 80 & `Age at CT` < 90 ~ "80-90",
+    `Age at CT` >= 90 & `Age at CT` < 100 ~ "90-100"
+    )
+    ) %>%
+  pivot_longer(-c(`Age at CT`, age_groups, index), names_to = "data", values_to = "measures")%>%
+  drop_na()
+
+age_20 <- data_f_2  %>%
+  pivot_wider(id_cols = c(index,`Age at CT`, age_groups), names_from = data, values_from = measures) %>%
+  filter(age_groups == "20-30") %>%
+  filter(.data[[val]] >= 207	 &.data[[val]]<= 245)
+
+
+age_30 <- data_f_2  %>%
+   pivot_wider(id_cols = c(index,`Age at CT`, age_groups), names_from = data, values_from = measures) %>%
+  filter(age_groups == "30-40") %>%
+  filter(.data[[val]] >= 192 & .data[[val]] <= 234)
+
+age_40 <- data_f_2  %>%
+  pivot_wider(id_cols = c(index,`Age at CT`, age_groups), names_from = data, values_from = measures) %>%
+  filter(age_groups == "40-50") %>%
+  filter(.data[[val]] >= 176 & .data[[val]] <= 221)
+
+age_50 <- data_f_2  %>%
+  pivot_wider(id_cols = c(index,`Age at CT`, age_groups), names_from = data, values_from = measures) %>%
+  filter(age_groups == "50-60") %>%
+  filter(.data[[val]] >= 152 & .data[[val]] <= 202)
+
+age_60 <- data_f_2  %>%
+  pivot_wider(id_cols = c(index,`Age at CT`, age_groups), names_from = data, values_from = measures) %>%
+  filter(age_groups == "60-70") %>%
+  filter(.data[[val]] >= 133 & .data[[val]] <= 179)
+
+age_70 <- data_f_2  %>%
+  pivot_wider(id_cols = c(index,`Age at CT`, age_groups), names_from = data, values_from = measures) %>%
+  filter(age_groups == "70-80") %>%
+  filter(.data[[val]] >= 117.5	 & .data[[val]] <= 158.5)
+
+age_80 <- data_f_2  %>%
+  pivot_wider(id_cols = c(index,`Age at CT`, age_groups), names_from = data, values_from = measures) %>%
+  filter(age_groups == "80-90") %>%
+  filter(.data[[val]] >= 105.5  & .data[[val]] <= 150)
+
+data_f2 <- rbind(age_20, age_30, age_40, age_50, age_60, age_70,age_80)
+```
+
+## KKNN for predicting biological age for healthly people
+
+```{r}
+split_ind <- createDataPartition(y = data_f2$`Age at CT`, p = 0.8, list = FALSE)
+train <- data_f2[split_ind,] %>% select(-c(index, age_groups))
+test <- data_f2[-split_ind,] %>% select(-c(index, age_groups))
+```
+
+```{r}
+hist(train$`Age at CT`)
+```
+
+
+```{r}
+#Train with leave one out cross-validation
+fit <- train.kknn(`Age at CT`~., data  = train, kmax = 17, kernel = "triangular") 
+plot(fit)
+```
+
+```{r}
+preds <- predict(fit, train)
+actual<- train$`Age at CT` 
+as.data.frame(preds,actual) %>%
+  ggplot(aes(actual, preds))+
+  geom_point()+
+  geom_abline(intercept = 0, slope = 1)
+```
+
+```{r}
+preds2 <- predict(fit, test)
+actual_age <- test$`Age at CT`
+
+as.data.frame(actual_age, preds2) %>%
+ggplot(aes(actual_age, preds2)) +
+  geom_point() +
+  geom_abline(slope = 1, intercept = 0)
+```
+
+```{r}
+dead_with_bio <- dead %>%
+  mutate(age_groups = case_when(
+    `Age at CT` >= 20 & `Age at CT` < 30 ~ "20-30",
+    `Age at CT` >= 30 & `Age at CT` < 40 ~ "30-40",
+    `Age at CT` >= 40 & `Age at CT` < 50 ~ "40-50",
+    `Age at CT` >= 50 & `Age at CT` < 60 ~ "50-60",
+    `Age at CT` >= 60 & `Age at CT` < 70 ~ "60-70",
+    `Age at CT` >= 70 & `Age at CT` < 80 ~ "70-80",
+    `Age at CT` >= 80 & `Age at CT` < 90 ~ "80-90"
+    )
+    ) %>% 
+  drop_na()
+```
+
+
+```{r}
+fit <- train.kknn(`Age at CT` ~., kmax=21, data = data_f2%>%select(-c(index, age_groups)), kernel = "triangular")
+
+plot(fit)
+```
+```{r}
+dead_with_bio <- dead_with_bio %>%
+  mutate(biological_age = predict(fit, dead_with_bio)) %>%
+  select(`Age at CT`, biological_age, `DEATH [d from CT]`, everything())
+
+```
+
+
+```{r}
+recipe <- dead_with_bio  %>%
+  recipe(~.) %>%
+  update_role(c(`DEATH [d from CT]`, biological_age, age_groups, index), new_role = "id")%>%
+  step_normalize(all_predictors()) %>%
+  step_umap(all_predictors())
+```
+
+```{r}
+prep_umap_3 <- prep(recipe)
+```
+
+```{r fig.height=8, fig.width=8}
+p1 <- juice(prep_umap_3) %>%
+  ggplot(aes(x = UMAP1, y = UMAP2, col = age_groups)) +
+  geom_point()
+
+p2 <- juice(prep_umap_3) %>%
+  ggplot(aes(x = UMAP1, y = UMAP2, col = `DEATH [d from CT]`)) +
+  geom_point()
+
+p3 <- juice(prep_umap_3) %>%
+  ggplot(aes(x = UMAP1, y = UMAP2, col = biological_age)) +
+  geom_point()+
+  scale_color_viridis_c(option = "magma")
+p1/p2/p3
+```
+
+
+
+
+```{r}
+data_f <- data_f2 %>%select(-c(index, age_groups))
+data_age <- as.h2o(data_f)
+
+parts <- h2o.splitFrame(data_age, ratios = 0.8)
+train <- parts[[1]]
+test <- parts[[2]]
+
+model_gbm <- h2o.gbm(2:12, 1, train, nfolds = 5, ntrees = 49,fold_assignment = "Modulo", score_tree_interval = 5, max_depth = 3, min_rows = 1, sample_rate = 0.9, col_sample_rate = 0.7,distribution = "gaussian", max_abs_leafnode_pred = 100, model_id = "first_age_pred")
+
+```
+
+
+```{r}
+model_gbm
+```
+
+```{r}
+pred_y <- h2o.predict(model_gbm, as.h2o(dead_with_bio)) 
+pred_y <- as.data.frame(pred_y) %>% pull(predict)
+```
+
+```{r}
+dead_with_bio <- dead_with_bio %>%
+  mutate(biological_age = pred_y) %>%
+  select(`Age at CT`, biological_age, `DEATH [d from CT]`, everything())
+
+```
+
+
+```{r}
+recipe <- dead_with_bio  %>%
+  recipe(~.) %>%
+  update_role(c(`DEATH [d from CT]`, biological_age, age_groups, index), new_role = "id")%>%
+  step_normalize(all_predictors()) %>%
+  step_umap(all_predictors())
+```
+
+```{r}
+prep_umap_3 <- prep(recipe)
+```
+
+```{r fig.height=8, fig.width=8}
+p1 <- juice(prep_umap_3) %>%
+  ggplot(aes(x = UMAP1, y = UMAP2, col = age_groups)) +
+  geom_point()
+
+p2 <- juice(prep_umap_3) %>%
+  ggplot(aes(x = UMAP1, y = UMAP2, col = `DEATH [d from CT]`)) +
+  geom_point()
+
+p3 <- juice(prep_umap_3) %>%
+  ggplot(aes(x = UMAP1, y = UMAP2, col = biological_age)) +
+  geom_point()+
+  scale_color_viridis_c(option = "magma")
+p1/p2/p3
+```
+
+```{r}
+# added years after death
+
+dead_with_bio <- dead_with_bio %>%
+  mutate(`DEATH [d from CT]` = `DEATH [d from CT]`/365)
+```
+
+```{r}
+# log trnasformtaion to change uniformity of data
+
+dead_with_bio <- dead_with_bio %>%
+  mutate(`DEATH [d from CT]` = log(`DEATH [d from CT]`))
+```
+
+```{r}
+hist(dead_with_bio$`DEATH [d from CT]`)
+```
+
+
+```{r}
+dead_with_bio <- dead_with_bio %>%
+  mutate(age_groups = as.factor(age_groups))
+```
+
+```{r warning=FALSE}
+## performed KNN on data with logged years after death
+
+split_ind <- createDataPartition(y = dead_with_bio$`DEATH [d from CT]`, p = 0.8, list = FALSE)
+train <- dead_with_bio[split_ind,] %>% select(-index)
+test <- dead_with_bio[-split_ind,]%>% select(-index)
+
+fit <- train.kknn(`DEATH [d from CT]`~., data = train, kmax = 25, kernel = "rectangular")
+
+plot(fit)
+```
+
+
+```{r fig.height = 6, fig.width = 6}
+
+recipe <- test %>%
+  mutate(pred_y = exp(predict(fit, test)), 
+         `DEATH [d from CT]` = exp(`DEATH [d from CT]`)) %>%
+  recipe(~.) %>%
+  update_role(c(age_groups, pred_y,`DEATH [d from CT]`), new_role = "id") %>%
+  step_normalize(all_predictors()) %>%
+  step_umap(all_predictors(), learn_rate = 1, seed = c(123, 123))
+
+
+prep_pred <- prep(recipe)
+
+p1 <- juice(prep_pred) %>%
+  ggplot(aes(x = UMAP1, y  = UMAP2, col = pred_y))+
+  geom_point()
+
+p2 <- juice(prep_pred) %>%
+  ggplot(aes(x = UMAP1, y  = UMAP2, col = age_groups))+
+  geom_point()
+
+p3 <- juice(prep_pred) %>%
+  ggplot(aes(x = UMAP1, y  = UMAP2, col = `DEATH [d from CT]`))+
+  geom_point()
+  
+
+(p1 / p3 / p2)
+```
+
+```{r}
+data_dead_gbm <- as.h2o(dead_with_bio %>%select(-index))
+parts <- h2o.splitFrame(data_dead_gbm, ratios = 0.8)
+train <- parts[[1]] 
+test <- parts[[2]]
+
+model_dead_1 <- h2o.gbm(c(1:2, 4:15), 3, train, nfolds = 5, ntrees = 24, max_depth = 3, sample_rate = 0.6, col_sample_rate = 0.7, col_sample_rate_per_tree = 0.4, model_id = "first dead model")
+```
+
+```{r}
+h2o.performance(model_dead_1, test)
+```
+
+```{r}
+summary(model_dead_1)
+```
+
+```{r fig.height = 6, fig.width = 6}
+pred_y = as.data.frame(h2o.predict(model_dead_1, test))$predict
+
+recipe <- as.data.frame(test) %>%
+  mutate(pred_y = exp(pred_y), 
+         DEATH..d.from.CT. = exp(DEATH..d.from.CT.)) %>%
+  recipe(~.) %>%
+  update_role(c(age_groups, pred_y,DEATH..d.from.CT.), new_role = "id") %>%
+  step_normalize(all_predictors()) %>%
+  step_umap(all_predictors(), learn_rate = 1, seed = c(123, 123))
+
+
+prep_pred <- prep(recipe)
+
+p1 <- juice(prep_pred) %>%
+  ggplot(aes(x = UMAP1, y  = UMAP2, col = pred_y))+
+  geom_point()
+
+p2 <- juice(prep_pred) %>%
+  ggplot(aes(x = UMAP1, y  = UMAP2, col = age_groups))+
+  geom_point()
+
+p3 <- juice(prep_pred) %>%
+  ggplot(aes(x = UMAP1, y  = UMAP2, col = DEATH..d.from.CT.))+
+  geom_point()
+  
+
+(p1 / p3 / p2)
+```
+
+
+## next step: add clinical data to the existing ct data to see improvements
+
+• Clinical Data
+– Col D: Clinical F/U interval [days from CT]
+– Cols E-J: pt BMI, sex, age (at time 0=CT date), smoking/drinking hx)
+– Col K: FRS = Framingham Risk Score (multivariable 10-yr cardiovascular risk score)
+– Cols L-M: FRAX = Fracture risk assessment score (multivariable 10-yr risk for all & hip fx) 
+– Col N: Metabolic Syndrome (Y/N/blank=unknown) ? really more of an outcome
+
+
+```{r}
+data_ct <- data_ct %>%
+  mutate(index = row_number())
+
+clinical <- data_ct %>%
+        filter(is.na(`DEATH [d from CT]`)) %>%
+       select(index,cols[4:9], cols[11:14]) %>%
+       filter(`FRS 10-year risk (%)` != '<1%' & `FRS 10-year risk (%)` != '>30%') %>%
+        filter(`FRAX 10y Fx Prob (Orange-w/ DXA)` != '_') %>%
+        drop_na()
+
+
+clinical[, "FRAX 10y Fx Prob (Orange-w/ DXA)"] <- as.numeric(clinical$`FRAX 10y Fx Prob (Orange-w/ DXA)`)
+clinical[, "FRS 10-year risk (%)"] <- as.numeric(clinical$`FRS 10-year risk (%)`)
+clinical[, "FRAX 10y Hip Fx Prob (Orange-w/ DXA)"] <- as.numeric(clinical$`FRAX 10y Hip Fx Prob (Orange-w/ DXA)`)
+
+clinical[,'BMI >30'] <- as.factor(clinical$`BMI >30`)
+clinical[,'Sex'] <- as.factor(clinical$Sex)
+clinical[,'Tobacco'] <- as.factor(clinical$Tobacco)
+clinical[,'Met Sx'] <- as.factor(clinical$`Met Sx`)
+```
+
+
+```{r}
+pivoted_cd <- clinical %>%
+  mutate(age_groups = case_when(
+    `Age at CT` >= 20 & `Age at CT` < 30 ~ "20-30",
+    `Age at CT` >= 30 & `Age at CT` < 40 ~ "30-40",
+    `Age at CT` >= 40 & `Age at CT` < 50 ~ "40-50",
+    `Age at CT` >= 50 & `Age at CT` < 60 ~ "50-60",
+    `Age at CT` >= 60 & `Age at CT` < 70 ~ "60-70",
+    `Age at CT` >= 70 & `Age at CT` < 80 ~ "70-80",
+    `Age at CT` >= 80 & `Age at CT` < 90 ~ "80-90",
+    `Age at CT` >= 90 & `Age at CT` < 100 ~ "90-100"
+    )
+    ) %>%
+  pivot_longer(-c(`Age at CT`, age_groups, Sex, `BMI >30`,Tobacco, index, `Met Sx`), names_to = "data", values_to = "measures")
+
+```
+
+```{r}
+## check features to see if they change based on age 
+
+val <- pivoted_cd[5,8] %>% pull() 
+
+pivoted_cd%>%
+  filter(data == val) %>%
+  ggplot(aes(x = measures, y = age_groups)) +
+  geom_boxplot()
+```
+
+
+
+```{r}
+## filter healthy group of people
+
+clinical_d2 <- clinical%>%
+  filter(`BMI >30` == 'N') %>%
+  filter(`FRS 10-year risk (%)` < 0.19) %>%
+  filter(Tobacco == 'No') %>%
+  filter(`Met Sx` == 'N')
+```
+
+```{r}
+## took only IQR for FRAX 10y Fx Prob (Orange-w/ DXA)
+
+val <- pivoted_cd[4,8] %>% pull() 
+
+pivoted_cd %>%
+  filter(data == val) %>%
+  group_by(age_groups) %>%
+  summarise(perc_25 = quantile(measures, prob = 0.25), 
+            perc_75 = quantile(measures, prob = 0.75))
+```
+
+```{r}
+age20 <- pivoted_cd  %>%
+  pivot_wider(id_cols = c(index, `BMI >30`,`Age at CT`, age_groups, Sex, Tobacco), names_from = data, values_from = measures) %>%
+  filter(age_groups == "20-30") %>%
+  filter(.data[[val]] >= 3.6900	 &.data[[val]]<= 3.6900)
+
+age30 <- pivoted_cd  %>%
+  pivot_wider(id_cols = c(index, `BMI >30`,`Age at CT`, age_groups, Sex, Tobacco), names_from = data, values_from = measures) %>%
+  filter(age_groups == "30-40") %>%
+  filter(.data[[val]] >= 1.5050	 &.data[[val]] <= 1.7100)
+
+age40 <- pivoted_cd  %>%
+  pivot_wider(id_cols = c(index, `BMI >30`,`Age at CT`, age_groups, Sex, Tobacco), names_from = data, values_from = measures) %>%
+  filter(age_groups == "40-50") %>%
+  filter(.data[[val]] >= 2.2300	 &.data[[val]] <= 2.9800)
+
+age50 <- pivoted_cd  %>%
+  pivot_wider(id_cols = c(index, `BMI >30`,`Age at CT`, age_groups, Sex, Tobacco), names_from = data, values_from = measures) %>%
+  filter(age_groups == "50-60") %>%
+  filter(.data[[val]] >= 3.0600	 &.data[[val]] <= 4.8200)
+
+age60 <- pivoted_cd  %>%
+  pivot_wider(id_cols = c(index, `BMI >30`,`Age at CT`, age_groups, Sex, Tobacco), names_from = data, values_from = measures) %>%
+  filter(age_groups == "60-70") %>%
+  filter(.data[[val]] >= 5.0300	 &.data[[val]] <= 8.4100)
+
+age70 <- pivoted_cd  %>%
+  pivot_wider(id_cols = c(index, `BMI >30`,`Age at CT`, age_groups, Sex, Tobacco), names_from = data, values_from = measures) %>%
+  filter(age_groups == "70-80") %>%
+  filter(.data[[val]] >= 6.3975	 &.data[[val]] <= 12.3775)
+
+age80 <- pivoted_cd  %>%
+  pivot_wider(id_cols = c(index, `BMI >30`,`Age at CT`, age_groups, Sex, Tobacco), names_from = data, values_from = measures) %>%
+  filter(age_groups == "80-90") %>%
+  filter(.data[[val]] >= 10.1500 &.data[[val]] <= 20.7100)
+
+age90 <- pivoted_cd  %>%
+  pivot_wider(id_cols = c(index, `BMI >30`,`Age at CT`, age_groups, Sex, Tobacco), names_from = data, values_from = measures) %>%
+  filter(age_groups == "80-90") %>%
+  filter(.data[[val]] >= 17.8850 &.data[[val]] <= 21.2700)
+
+
+clinical2 <- rbind(age20, age30, age40, age50, age60, age70, age80, age90)
+
+# clinical_filt <- clinical2 %>%
+#   inner_join(clinical_d2)
+```
+
+
+```{r}
+## took only IQR for FRAX 10y Hip Fx Prob (Orange-w/ DXA)
+
+val <- pivoted_cd[5,8] %>% pull() 
+
+pivoted_cd %>%
+  filter(data == val) %>%
+  group_by(age_groups) %>%
+  summarise(perc_25 = quantile(measures, prob = 0.25), 
+            perc_75 = quantile(measures, prob = 0.75))
+```
+
+
+```{r}
+age20 <- pivoted_cd  %>%
+  pivot_wider(id_cols = c(index, `BMI >30`,`Age at CT`, age_groups, Sex, Tobacco), names_from = data, values_from = measures) %>%
+  filter(age_groups == "20-30") %>%
+  filter(.data[[val]] >= 0.4200	 &.data[[val]]<= 0.4200)
+
+age30 <- pivoted_cd  %>%
+  pivot_wider(id_cols = c(index, `BMI >30`,`Age at CT`, age_groups, Sex, Tobacco), names_from = data, values_from = measures) %>%
+  filter(age_groups == "30-40") %>%
+  filter(.data[[val]] >= 0.0575	 &.data[[val]] <= 0.0725)
+
+age40 <- pivoted_cd  %>%
+  pivot_wider(id_cols = c(index, `BMI >30`,`Age at CT`, age_groups, Sex, Tobacco), names_from = data, values_from = measures) %>%
+  filter(age_groups == "40-50") %>%
+  filter(.data[[val]] >= 0.0800	 &.data[[val]] <= 0.2000)
+
+age50 <- pivoted_cd  %>%
+  pivot_wider(id_cols = c(index, `BMI >30`,`Age at CT`, age_groups, Sex, Tobacco), names_from = data, values_from = measures) %>%
+  filter(age_groups == "50-60") %>%
+  filter(.data[[val]] >= 0.1400	 &.data[[val]] <= 1.2825)
+
+age60 <- pivoted_cd  %>%
+  pivot_wider(id_cols = c(index, `BMI >30`,`Age at CT`, age_groups, Sex, Tobacco), names_from = data, values_from = measures) %>%
+  filter(age_groups == "60-70") %>%
+  filter(.data[[val]] >= 0.4700	 &.data[[val]] <= 8.4100)
+
+age70 <- pivoted_cd  %>%
+  pivot_wider(id_cols = c(index, `BMI >30`,`Age at CT`, age_groups, Sex, Tobacco), names_from = data, values_from = measures) %>%
+  filter(age_groups == "70-80") %>%
+  filter(.data[[val]] >= 1.6100	 &.data[[val]] <= 4.3000)
+
+age80 <- pivoted_cd  %>%
+  pivot_wider(id_cols = c(index, `BMI >30`,`Age at CT`, age_groups, Sex, Tobacco), names_from = data, values_from = measures) %>%
+  filter(age_groups == "80-90") %>%
+  filter(.data[[val]] >= 4.0850 &.data[[val]] <= 10.2200)
+
+age90 <- pivoted_cd  %>%
+  pivot_wider(id_cols = c(index, `BMI >30`,`Age at CT`, age_groups, Sex, Tobacco), names_from = data, values_from = measures) %>%
+  filter(age_groups == "80-90") %>%
+  filter(.data[[val]] >= 7.2000 &.data[[val]] <= 10.6950)
+
+
+clinical3 <- rbind(age20, age30, age40, age50, age60, age70, age80, age90)
+```
+
+
+```{r}
+clinical_cleaned <- clinical3 %>%
+  inner_join(clinical2, by = 'index') %>%
+  inner_join(clinical_d2, by = 'index') 
+
+indices <- clinical_cleaned %>%
+  inner_join(data_ct %>% select(index, cols[42:52]), by = "index") %>%
+  drop_na() %>%
+  pull(index)
+
+
+cact <- clinical %>%
+  mutate(age_groups = case_when(
+    `Age at CT` >= 20 & `Age at CT` < 30 ~ "20-30",
+    `Age at CT` >= 30 & `Age at CT` < 40 ~ "30-40",
+    `Age at CT` >= 40 & `Age at CT` < 50 ~ "40-50",
+    `Age at CT` >= 50 & `Age at CT` < 60 ~ "50-60",
+    `Age at CT` >= 60 & `Age at CT` < 70 ~ "60-70",
+    `Age at CT` >= 70 & `Age at CT` < 80 ~ "70-80",
+    `Age at CT` >= 80 & `Age at CT` < 90 ~ "80-90",
+    `Age at CT` >= 90 & `Age at CT` < 100 ~ "90-100"
+    )
+    ) %>%
+  filter(index %in% indices) %>%
+   inner_join(data_ct %>% select(index, cols[42:52]), by = "index")
+
+
+ages_40 <- cact %>%
+  filter(age_groups == "40-50") %>%
+  filter(L1_HU_BMD >= 176 & L1_HU_BMD <= 221)
+
+
+ages_50 <- cact %>%
+  filter(age_groups == "50-60") %>%
+  filter( L1_HU_BMD>= 152	 & L1_HU_BMD <= 202)
+
+
+ages_60 <- cact %>%
+  filter(age_groups == "60-70") %>%
+  filter( L1_HU_BMD >= 133 & L1_HU_BMD <= 179	)
+
+
+ages_70 <- cact %>%
+  filter(age_groups == "70-80") %>%
+  filter( L1_HU_BMD >= 118	& L1_HU_BMD <= 158)
+
+ages_80 <- cact %>%
+  filter(age_groups == "80-90") %>%
+  filter(L1_HU_BMD >= 106 & L1_HU_BMD <= 141	)
+
+
+
+cact_2 <- rbind(ages_40,ages_50, ages_60, ages_70, ages_80)
+
+
+ cact_2
+```
+```{r}
+ages_40 <- cact_2 %>%
+  filter(age_groups == "40-50") %>%
+  filter(`AoCa        Agatston`>= 0 & `AoCa        Agatston` <= 22.931	)
+
+
+ages_50 <- cact_2 %>%
+  filter(age_groups == "50-60") %>%
+  filter( `AoCa        Agatston`>= 0.000		 & `AoCa        Agatston` <= 192.439	)
+
+
+ages_60 <- cact_2 %>%
+  filter(age_groups == "60-70") %>%
+  filter( `AoCa        Agatston` >= 36.914	 & `AoCa        Agatston` <= 988.281		)
+
+
+ages_70 <- cact_2%>%
+  filter(age_groups == "70-80") %>%
+  filter( `AoCa        Agatston`>= 390.894		& `AoCa        Agatston` <= 3806.876	)
+
+ages_80 <- cact_2 %>%
+  filter(age_groups == "80-90") %>%
+  filter(`AoCa        Agatston` >= 1413.574	 & `AoCa        Agatston` <= 5079.630)
+
+
+
+cact_3 <- rbind(ages_40,ages_50, ages_60, ages_70, ages_80)
+
+
+cact_3
+```
+
+```{r}
+
+
+split_ind <- createDataPartition(y = cact_3$`Age at CT`, p = 0.8, list = FALSE)
+train <- cact_3[split_ind,] %>% select(-c(index, age_groups, Sex,`BMI >30`,Tobacco, `Clinical F/U interval  [d from CT]`, `Met Sx`))
+test <- cact_3[-split_ind,] %>% select(-c(index, age_groups, Sex,`BMI >30`, Tobacco, `Clinical F/U interval  [d from CT]`, `Met Sx`))
+```
+
+```{r}
+fit <- train.kknn(`Age at CT`~., data = train, method = "kknn", kmax = 25, kernel = "triangular")
+
+plot(fit)
+```
+
+
+```{r}
+age_pred <- predict(fit, test)
+RMSE(age_pred, test$`Age at CT`)
+```
+
+
+```{r fig.height=6}
+actual_age <- test$`Age at CT`
+as.data.frame(age_pred, actual_age) %>%
+  ggplot(aes(age_pred, actual_age)) +
+    geom_point() +
+    scale_x_continuous(breaks = seq(52, 100, by = 5)) +
+    scale_y_continuous(breaks = seq(52, 100, by = 5)) +
+    geom_abline(slope = 1, intercept = 0)
+```
+
+```{r}
+data_cd<- cact_3 %>%select(-c(index, age_groups, Sex,`BMI >30`,Tobacco, `Clinical F/U interval  [d from CT]`, `Met Sx`))
+data_age <- as.h2o(data_cd)
+
+parts <- h2o.splitFrame(data_age, ratios = 0.8)
+train <- parts[[1]]
+test <- parts[[2]]
+
+model_age_2 <- h2o.gbm(c(1, 3:16), 2, train, sample_rate = 0.8, col_sample_rate = 0.8, ntrees = 44, max_depth = 10, nfolds = 5, max_abs_leafnode_pred = 90, model_id = "second_age_pred")
+
+```
+
+
+```{r}
+h2o.performance(model_age_2, test)
+```
+
+```{r}
+
+
+```
+
+
+
+```{r}
+
+```
+
+
+```{r}
+actual_age2 <- as.data.frame(test)$Age.at.CT
+pred_age <- as.data.frame(h2o.predict(model_age_2, test))$predict
+
+as.data.frame(pred_age, actual_age2) %>%
+  ggplot(aes(pred_age, actual_age2)) +
+    geom_point() +
+    geom_abline(intercept = 0, slope = 1)
+```
+```{r}
+model_age_2 <- h2o.gbm(c(1, 3:16), 2, data_age, sample_rate = 0.8, col_sample_rate = 0.8, ntrees = 44, max_depth = 10, nfolds = 5, max_abs_leafnode_pred = 100, model_id = "second_age_pred")
+```
+
+
+```{r}
+
+clinical_dead <- data_ct %>%
+        filter(!is.na(`DEATH [d from CT]`)) %>%
+       select(cols[4:9], cols[11:14], cols[42:52], `DEATH [d from CT]`) %>%
+       filter(`FRS 10-year risk (%)` != '<1%' & `FRS 10-year risk (%)` != '>30%') %>%
+        filter(`FRAX 10y Fx Prob (Orange-w/ DXA)` != '_') %>%
+        drop_na()
+
+
+clinical_dead[, "FRAX 10y Fx Prob (Orange-w/ DXA)"] <- as.numeric(clinical_dead$`FRAX 10y Fx Prob (Orange-w/ DXA)`)
+clinical_dead[, "FRS 10-year risk (%)"] <- as.numeric(clinical_dead$`FRS 10-year risk (%)`)
+clinical_dead[, "FRAX 10y Hip Fx Prob (Orange-w/ DXA)"] <- as.numeric(clinical_dead$`FRAX 10y Hip Fx Prob (Orange-w/ DXA)`)
+
+clinical_dead[,'BMI >30'] <- as.factor(clinical_dead$`BMI >30`)
+clinical_dead[,'Sex'] <- as.factor(clinical_dead$Sex)
+clinical_dead[,'Tobacco'] <- as.factor(clinical_dead$Tobacco)
+clinical_dead[,'Met Sx'] <- as.factor(clinical_dead$`Met Sx`)
+```
+
+
+
+
+```{r}
+clinical_dead <- clinical_dead %>% 
+  select(-c(`Clinical F/U interval  [d from CT]`, Sex)) 
+```
+
+
+```{r fig.height= 15, fig.width=15}
+clinical_dead_data <- as.h2o(clinical_dead)
+predictions <- as.data.frame(h2o.predict(model_age_2, clinical_dead_data))
+
+clinical_dead_with_bio <- clinical_dead %>%
+  mutate(biological_age = predictions$predict, 
+        `DEATH [d from CT]` = log(`DEATH [d from CT]`/365) )%>%
+  select(`Age at CT`, biological_age, `DEATH [d from CT]`, everything())
+
+
+```
+
+```{r}
+cdbh <- as.h2o(clinical_dead_with_bio)
+```
+
+```{r}
+parts <- h2o.splitFrame(cdbh, ratios = 0.8)
+train <- parts[[1]]
+test <- parts[[2]]
+
+# h2o.gbm(c(1:2, 4:21), 3, train, sample_rate = 0.8, col_sample_rate = 0.7, ntrees = 26, max_depth = 15, min_rows = 5, min_split_improvement = 0.0001, col_sample_rate_per_tree= 0.4, nfolds = 5, model_id = "dead_age_pred_2")
+
+model_dead <- h2o.gbm(c(1:2, 4:21), 3, train, sample_rate = 0.6, col_sample_rate = 0.7, ntrees =23, max_depth = 8, min_split_improvement = 0.0001, score_tree_interval = 5, nfolds = 10, model_id = "dead_age_pred_2")
+```
+
+```{r}
+summary(model_dead)
+```
+
+```{r}
+h2o.performance(model_dead, test)
+```
+
+```{r fig.height = 6, fig.width = 6}
+preds <- h2o.predict(model_dead, cdbh)
+
+preds <- as.data.frame(preds) %>% pull(predict)
+
+clinical_dead_with_bio %>%
+  mutate(death_pred = preds) %>%
+  mutate(`DEATH [d from CT]` = exp(`DEATH [d from CT]`), 
+         death_pred = exp(death_pred)) %>%
+  select(`DEATH [d from CT]`, death_pred , biological_age, `Age at CT`, everything()) %>%
+  ggplot(aes(y = `DEATH [d from CT]`, x = death_pred))+
+  geom_point()+
+  scale_x_continuous(breaks = seq(0, 15, by=1))+
+  scale_y_continuous(breaks = seq(0, 15, by = 1)) +
+  geom_abline(intercept = 0, slope = 1)
+```
+
+
+
+
+```{r}
+recipe <- clinical_dead_with_bio %>%
+  mutate(death_pred = preds) %>%
+  mutate(`DEATH [d from CT]` = exp(`DEATH [d from CT]`), 
+         death_pred = exp(death_pred)) %>%
+  mutate(biological_age_groups = case_when(
+      biological_age >= 20 & biological_age < 30 ~ "20-30",
+      biological_age >= 30 & biological_age < 40 ~ "30-40",
+      biological_age >= 40 & biological_age< 50 ~ "40-50",
+      biological_age >= 50 & biological_age < 60 ~ "50-60",
+      biological_age >= 60 & biological_age < 70 ~ "60-70",
+      biological_age >= 70 & biological_age < 80 ~ "70-80",
+      biological_age >= 80 & biological_age < 90 ~ "80-90"
+      )
+      )%>%
+  recipe(~.) %>%
+  update_role(c(biological_age_groups, death_pred,`DEATH [d from CT]`, `BMI >30`, Tobacco, `Met Sx`), new_role = "id")%>%
+  step_normalize(all_predictors())%>%
+  step_umap(all_predictors())
+
+
+prep_umap_4 <- prep(recipe)
+```
+
+```{r fig.width=10, fig.width=10}
+p1 <- juice(prep_umap_4) %>%
+  ggplot(aes(x = UMAP1, y = UMAP2, col = death_pred)) +
+  geom_point()
+
+p2 <- juice(prep_umap_4)%>%
+  ggplot(aes(x = UMAP1, y = UMAP2, col = `DEATH [d from CT]`)) +
+  geom_point()
+
+p3 <- juice(prep_umap_4)%>%
+  ggplot(aes(x = UMAP1, y = UMAP2, col = biological_age_groups)) +
+  geom_point()
+
+
+p1/p2/p3
+```
+```{r}
+differences <- clinical_dead_with_bio %>%
+  mutate(death_pred = preds) %>%
+  mutate(`DEATH [d from CT]` = exp(`DEATH [d from CT]`), 
+         death_pred = exp(death_pred), 
+         diff = abs(death_pred - `DEATH [d from CT]` )) %>% pull(diff)
+
+
+hist(differences)
+
+```
+
+
+
+```{r}
+split_ind <- createDataPartition(y = clinical_dead_with_bio$`DEATH [d from CT]`, p = 0.8, list = FALSE)
+train <- clinical_dead_with_bio[split_ind,]
+test <- clinical_dead_with_bio[-split_ind,]
+
+control <- trainControl(method = "adaptive_cv", number = 10, repeats = 3)
+fit <- train.kknn(`DEATH [d from CT]`~., data = train, kmax = 23, kernel = c( "gaussian"))
+
+```
+
+```{r fig.height = 6, fig.width = 6}
+RMSE(predict(fit, test), test$`DEATH [d from CT]`)
+
+clinical_dead_with_bio %>%
+  mutate(death_pred = predict(fit, clinical_dead_with_bio)) %>%
+  mutate(`DEATH [d from CT]` = exp(`DEATH [d from CT]`), 
+         death_pred = exp(death_pred)) %>%
+  select(`DEATH [d from CT]`, death_pred , biological_age, `Age at CT`, everything()) %>%
+  ggplot(aes(y = `DEATH [d from CT]`, x = death_pred))+
+  geom_point()+
+  scale_x_continuous(breaks = seq(0, 15, by=1))+
+  scale_y_continuous(breaks = seq(0, 15, by = 1)) 
+```
+```{r}
+recipe <- clinical_dead_with_bio %>%
+  mutate(death_pred = predict(fit, clinical_dead_with_bio)) %>%
+  mutate(`DEATH [d from CT]` = exp(`DEATH [d from CT]`),
+         death_pred = exp(death_pred)) %>%
+  select(`DEATH [d from CT]`, death_pred , biological_age, `Age at CT`, everything())%>%
+  mutate(biological_age_groups = case_when(
+      biological_age >= 20 & biological_age < 30 ~ "20-30",
+      biological_age >= 30 & biological_age < 40 ~ "30-40",
+      biological_age >= 40 & biological_age< 50 ~ "40-50",
+      biological_age >= 50 & biological_age < 60 ~ "50-60",
+      biological_age >= 60 & biological_age < 70 ~ "60-70",
+      biological_age >= 70 & biological_age < 80 ~ "70-80",
+      biological_age >= 80 & biological_age < 90 ~ "80-90"
+      )
+      )%>%
+  recipe(~.) %>%
+  update_role(c(biological_age_groups, death_pred,`DEATH [d from CT]`, `BMI >30`, Tobacco, `Met Sx`), new_role = "id")%>%
+  step_normalize(all_predictors())%>%
+  step_umap(all_predictors())
+
+
+prep_umap_4 <- prep(recipe)
+```
+
+```{r fig.width=10, fig.width=10}
+p1 <- juice(prep_umap_4) %>%
+  ggplot(aes(x = UMAP1, y = UMAP2, col = death_pred)) +
+  geom_point()
+
+p2 <- juice(prep_umap_4)%>%
+  ggplot(aes(x = UMAP1, y = UMAP2, col = `DEATH [d from CT]`)) +
+  geom_point()
+
+p3 <- juice(prep_umap_4)%>%
+  ggplot(aes(x = UMAP1, y = UMAP2, col = biological_age_groups)) +
+  geom_point()
+
+
+p1/p2/p3
+```
